@@ -1812,15 +1812,18 @@ up() {
 				local title="$(translate "Device status changed")"
 				local content_title="${str_title_start}$(translate "New device connected")${str_title_end}"
 			fi
-	        # 获取设备 dBm
-			local dbm_value=$(find_Dbm "$mac")
+
 			content="\
 ${str_splitline}\
 ${content_title}\
 ${str_linefeed}${str_tab} - $(translate "Client Name:")${str_space}${str_space}${str_space}${str_space}${str_space}${name}\
 ${str_linefeed}${str_tab} - $(translate "Client IP:")${str_space}${str_space}${str_space}${str_space}${ip}\
 ${str_linefeed}${str_tab} - $(translate "Client MAC:")${str_space}${str_space}${str_space}${str_space}${mac}\
-${str_linefeed}${str_tab} - $(translate "Network Interface:")${str_space}${str_space}${str_space}${str_space}${str_space}${interface}\
+${str_linefeed}${str_tab} - $(translate "Network Interface:")${str_space}${str_space}${str_space}${str_space}${str_space}${interface}"
+			
+			# 添加dBm信息
+   			 local dbm_value=$(find_Dbm "$mac")
+    		[ -n "$dbm_value" ] && content="${content}\
 ${str_linefeed}${str_tab} - $(translate "Device dBm:")${str_space}${str_space}${str_space}${str_space}${dbm_value}"
 
 			log_change "${disturb_text} $(translate "New device %s %s connected" "$name" "$ip")"
@@ -2113,7 +2116,6 @@ get_client_usage() {
 					local content_title="${str_splitline}${str_title_start}$(translate "Device abnormal traffic")${str_title_end}"
 				fi
 
-				local dbm_value=$(find_Dbm "$mac")
 				content="\
 ${content}\
 ${content_title}\
@@ -2123,8 +2125,12 @@ ${str_linefeed}${str_tab} - $(translate "Client MAC:")${str_space}${str_space}${
 ${str_linefeed}${str_tab} - $(translate "Traffic in 1 minute:")${str_space}${str_space}${str_space}${tmp_usage}\
 ${str_linefeed}${str_tab} - $(translate "Upload in 1 minute:")${str_space}${str_space}${str_space}${tmp_out_usage}\
 ${str_linefeed}${str_tab} - $(translate "Download in 1 minute:")${str_space}${str_space}${tmp_in_usage}\
-${str_linefeed}${str_tab} - $(translate "Uptime:")${str_space}${str_space}${str_space}${str_space}${time1}\
+${str_linefeed}${str_tab} - $(translate "Uptime:")${str_space}${str_space}${str_space}${str_space}${time1}"
+				# 添加dBm信息
+    			local dbm_value=$(find_Dbm "$mac")
+    			[ -n "$dbm_value" ] && content="${content}\
 ${str_linefeed}${str_tab} - $(translate "Device dBm:")${str_space}${str_space}${str_space}${str_space}${dbm_value}"
+			
 			fi
 		done
 		cat ${dir}/client_usage_aliases >${dir}/old_client_usage_aliases
@@ -2679,13 +2685,14 @@ down_send() {
 			content_title="${str_splitline}${str_title_start}$(translate "Device Disconnected")${str_title_end}"
 		fi
 
-		local dbm_value=$(find_Dbm "$mac")
 		content="${content}\
 ${content_title}\
 ${str_linefeed}${str_tab} - $(translate "Client Name:")${str_space}${str_space}${str_space}${str_space}${str_space}${name}\
 ${str_linefeed}${str_tab} - $(translate "Client IP:")${str_space}${str_space}${str_space}${str_space}${ip}\
 ${str_linefeed}${str_tab} - $(translate "Client MAC:")${str_space}${str_space}${str_space}${str_space}${mac}${ip_total}\
-${str_linefeed}${str_tab} - $(translate "Uptime:")${str_space}${str_space}${str_space}${str_space}${time1}\
+${str_linefeed}${str_tab} - $(translate "Uptime:")${str_space}${str_space}${str_space}${str_space}${time1}"
+		local dbm_value=$(find_Dbm "$mac")
+		[ -n "$dbm_value" ] && content="${content}\
 ${str_linefeed}${str_tab} - $(translate "Device dBm:")${str_space}${str_space}${str_space}${str_space}${dbm_value}"
 
 		log_change "${disturb_text} $(translate "Device %s %s disconnected" "$name" "$ip")"
