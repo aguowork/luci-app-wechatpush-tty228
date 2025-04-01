@@ -116,6 +116,32 @@ read_config() {
 	cron
 }
 
+# 输入mac地址，返回信号强度
+find_Dbm() {
+    local mac="$1"
+    local wxjk_dbm
+    
+    # 获取所有无线设备（去重）
+    local devices=$(ubus call uci get '{ "config": "wireless", "type": "wifi-iface" }' | \
+                   jsonfilter -e '$["values"][*].device' | \
+                   sort -u)
+    
+    # 遍历每个设备，找到匹配立即退出
+    for device in $devices; do
+        wxjk_dbm=$(iwinfo "$device" assoclist 2>/dev/null | \
+                  grep -i "$mac" | \
+                  grep -oE '[-]?[0-9]+ dBm' | \
+                  grep -oE '[-]?[0-9]+')
+        [ -n "$wxjk_dbm" ] && { echo "$wxjk_dbm"; return 0; }
+    done
+    
+    # 未找到返回空
+    echo ""
+    return 1
+    # 调用示例：
+    # wxjk_dbm=$(find_Dbm "00:11:22:33:44:55")
+}
+
 # 初始化
 init() {
 	# 检测程序开关
@@ -1780,7 +1806,7 @@ up() {
 
 			[ -f "${dir}/title" ] && local title=$(cat "${dir}/title")
 			[ -f "${dir}/content" ] && local content=$(cat "${dir}/content")
-
+			
 			if [ -z "$title" ]; then
 				local title=$(translate "%s connected to your router" "$name")
 				local content_title="${str_title_start}$(translate "New device connected")${str_title_end}"
@@ -1790,6 +1816,8 @@ up() {
 				local title="$(translate "Device status changed")"
 				local content_title="${str_title_start}$(translate "New device connected")${str_title_end}"
 			fi
+	        # 添加获取设备dBm值
+			local dbm_value=$(find_Dbm "$mac")
 
 			content="\
 ${str_splitline}\
@@ -1798,6 +1826,9 @@ ${str_linefeed}${str_tab} - $(translate "Client Name:")${str_space}${str_space}$
 ${str_linefeed}${str_tab} - $(translate "Client IP:")${str_space}${str_space}${str_space}${str_space}${ip}\
 ${str_linefeed}${str_tab} - $(translate "Client MAC:")${str_space}${str_space}${str_space}${str_space}${mac}\
 ${str_linefeed}${str_tab} - $(translate "Network Interface:")${str_space}${str_space}${str_space}${str_space}${str_space}${interface}"
+	        # 判断是否存在dBm值
+			[ -n "$dbm_value" ] && content="${content}\
+${str_linefeed}${str_tab} - $(translate "Signal Strength:")${str_space}${str_space}${str_space}${str_space}${str_space}${dbm_value}"
 
 			log_change "${disturb_text} $(translate "New device %s %s connected" "$name" "$ip")"
 
@@ -2019,58 +2050,80 @@ unattended() {
 
 # 设备异常流量检测
 get_client_usage() {
-	[ -z "$client_usage" ] && return
-	[ "$client_usage" -ne "1" ] && return
-	[ -z "$client_usage_max" ] && return
+    [ -z "$client_usage" ] && return
+    [ "$client_usage" -ne "1" ] && return
+    [ -z "$client_usage_max" ] && return
 
-	[ -z "$get_client_usage_time" ] && get_client_usage_time=$(date +%s)
-	(echo $client_usage_max | sed -r 's/.*(.)$/\1/' | grep -q "K\|k") && client_usage_max=$(expr ${client_usage_max%?} \* 1024)
-	(echo $client_usage_max | sed -r 's/.*(.)$/\1/' | grep -q "M\|m") && client_usage_max=$(expr ${client_usage_max%?} \* 1048576)
-	(echo $client_usage_max | sed -r 's/.*(.)$/\1/' | grep -q "G\|g") && client_usage_max=$(expr ${client_usage_max%?} \* 1073741824)
-	[ -z "$client_usage_disturb" ] && client_usage_disturb="0"
-	[ "$client_usage_disturb" -eq "0" ] && local MACLIST=$(jq -r '.devices[] | select(.status == "online") | .mac' "$devices_json" | sort -u)
-	[ "$client_usage_disturb" -eq "1" ] && [ -n "$client_usage_whitelist" ] && local MACLIST=$(echo "$client_usage_whitelist")
-	[ -z "$MACLIST" ] && return
+    [ -z "$get_client_usage_time" ] && get_client_usage_time=$(date +%s)
+    (echo $client_usage_max | sed -r 's/.*(.)$/\1/' | grep -q "K\|k") && client_usage_max=$(expr ${client_usage_max%?} \* 1024)
+    (echo $client_usage_max | sed -r 's/.*(.)$/\1/' | grep -q "M\|m") && client_usage_max=$(expr ${client_usage_max%?} \* 1048576)
+    (echo $client_usage_max | sed -r 's/.*(.)$/\1/' | grep -q "G\|g") && client_usage_max=$(expr ${client_usage_max%?} \* 1073741824)
+    [ -z "$client_usage_disturb" ] && client_usage_disturb="0"
+    [ "$client_usage_disturb" -eq "0" ] && local MACLIST=$(jq -r '.devices[] | select(.status == "online") | .mac' "$devices_json" | sort -u)
+    [ "$client_usage_disturb" -eq "1" ] && [ -n "$client_usage_whitelist" ] && local MACLIST=$(echo "$client_usage_whitelist")
+    [ -z "$MACLIST" ] && return
 
-	if [ "$(($(date +%s) - $get_client_usage_time))" -ge "60" ]; then
-		>${dir}/client_usage_aliases
-		for mac in $MACLIST; do
-			echo "$mac" $(usage get ${mac} bytes) >>${dir}/client_usage_aliases
-			[ -f "${dir}/old_client_usage_aliases" ] && get_client_usage_bytes=$(cat ${dir}/old_client_usage_aliases | grep -i -w $mac | awk '{print $2}' | grep -v "^$" | sort -u | head -n1) || continue
+    if [ "$(($(date +%s) - $get_client_usage_time))" -ge "60" ]; then
+        >${dir}/client_usage_aliases
+        for mac in $MACLIST; do
+            # 一次性读取usage.db并提取所有需要的数据
+            local usage_data=$(grep -i "^${mac}," "${dir}/usage.db")
+            local current_total=$(usage get ${mac} bytes)
+            local current_in=$(echo "$usage_data" | awk -F, '{print $6}')
+            local current_out=$(echo "$usage_data" | awk -F, '{print $7}')
+            
+            echo "$mac $current_total $current_in $current_out" >>${dir}/client_usage_aliases
+            
+            [ -f "${dir}/old_client_usage_aliases" ] && {
+                get_client_usage_bytes=$(awk -v mac="$mac" '$1 == mac {print $2}' ${dir}/old_client_usage_aliases)
+                get_client_usage_in=$(awk -v mac="$mac" '$1 == mac {print $3}' ${dir}/old_client_usage_aliases)
+                get_client_usage_out=$(awk -v mac="$mac" '$1 == mac {print $4}' ${dir}/old_client_usage_aliases)
+            } || continue
 
-			[ -z "$get_client_usage_bytes" ] && get_client_usage_bytes="0"
-			if [ "$(($(usage get ${mac} bytes) - $get_client_usage_bytes))" -ge "$client_usage_max" ]; then
-				local ip=$(jq -r --arg mac "$mac" '.devices[] | select((.mac | ascii_downcase) == ($mac | ascii_downcase) and .status == "online") | .ip' "$devices_json")
-				local ip_name=$(getname ${ip} ${mac})
-				local tmp_usage=$(bytes_for_humans $(expr $(usage get ${mac} bytes) - ${get_client_usage_bytes}))
-				local time_up=$(jq -r --arg mac "$mac" '.devices[] | select((.mac | ascii_downcase) == ($mac | ascii_downcase) and .status == "online") | .uptime' "$devices_json")
-				local ip_total=$(usage get $mac) && [ -n "$ip_total" ] && local ip_total="${str_linefeed}${str_tab} - $(translate "Total Traffic:") ${str_space}${str_space}${str_space}${str_space}${ip_total}"
-				local time1=$(date +%s)
-				local time1=$(time_for_humans $(expr ${time1} - ${time_up}))
-				
-				if [ -z "$title" ]; then
-					title=$(translate "%s abnormal traffic" "$name")
-					local content_title="${str_splitline}${str_title_start}$(translate "Device abnormal traffic")${str_title_end}"
-				elif echo "$title" | grep -q "$(translate "abnormal traffic")"; then
-					title="${ip_name} ${title}"
-				else
-					title="$(translate "Device status changed")"
-					local content_title="${str_splitline}${str_title_start}$(translate "Device abnormal traffic")${str_title_end}"
-				fi
+            [ -z "$get_client_usage_bytes" ] && get_client_usage_bytes="0"
+            [ -z "$get_client_usage_in" ] && get_client_usage_in="0"
+            [ -z "$get_client_usage_out" ] && get_client_usage_out="0"
+            
+            if [ "$(($current_total - $get_client_usage_bytes))" -ge "$client_usage_max" ]; then
+                local ip=$(jq -r --arg mac "$mac" '.devices[] | select((.mac | ascii_downcase) == ($mac | ascii_downcase) and .status == "online") | .ip' "$devices_json")
+                local ip_name=$(getname ${ip} ${mac})
+                local tmp_usage=$(bytes_for_humans $(expr $current_total - $get_client_usage_bytes))
+                local tmp_upload=$(bytes_for_humans $(expr $current_out - $get_client_usage_out))
+                local tmp_download=$(bytes_for_humans $(expr $current_in - $get_client_usage_in))
+                local time_up=$(jq -r --arg mac "$mac" '.devices[] | select((.mac | ascii_downcase) == ($mac | ascii_downcase) and .status == "online") | .uptime' "$devices_json")
+                local ip_total=$(usage get $mac) && [ -n "$ip_total" ] && local ip_total="${str_linefeed}${str_tab} - $(translate "Total Traffic:") ${str_space}${str_space}${str_space}${str_space}${ip_total}"
+                local time1=$(date +%s)
+                local time1=$(time_for_humans $(expr ${time1} - ${time_up}))
+                local dbm_value=$(find_Dbm "$mac")
 
-				content="\
+                if [ -z "$title" ]; then
+                    title=$(translate "%s abnormal traffic" "$name")
+                    local content_title="${str_splitline}${str_title_start}$(translate "Device abnormal traffic")${str_title_end}"
+                elif echo "$title" | grep -q "$(translate "abnormal traffic")"; then
+                    title="${ip_name} ${title}"
+                else
+                    title="$(translate "Device status changed")"
+                    local content_title="${str_splitline}${str_title_start}$(translate "Device abnormal traffic")${str_title_end}"
+                fi
+
+                content="\
 ${content}\
 ${content_title}\
 ${str_linefeed}${str_tab} - $(translate "Client Name:")${str_space}${str_space}${str_space}${str_space}${str_space}${ip_name}\
 ${str_linefeed}${str_tab} - $(translate "Client IP:")${str_space}${str_space}${str_space}${str_space}${ip}\
 ${str_linefeed}${str_tab} - $(translate "Client MAC:")${str_space}${str_space}${str_space}${str_space}${mac}${ip_total}\
 ${str_linefeed}${str_tab} - $(translate "Traffic in 1 minute:")${str_space}${str_space}${str_space}${tmp_usage}\
+${str_linefeed}${str_tab} - $(translate "Upload Traffic:")${str_space}${str_space}${str_space}${tmp_upload}\
+${str_linefeed}${str_tab} - $(translate "Download Traffic:")${str_space}${str_space}${tmp_download}\
 ${str_linefeed}${str_tab} - $(translate "Uptime:")${str_space}${str_space}${str_space}${str_space}${time1}"
-			fi
-		done
-		cat ${dir}/client_usage_aliases >${dir}/old_client_usage_aliases
-		get_client_usage_time=$(date +%s)
-	fi
+                
+                [ -n "$dbm_value" ] && content="${content}\
+${str_linefeed}${str_tab} - $(translate "Signal Strength:")${str_space}${str_space}${dbm_value}"
+            fi
+        done
+        cat ${dir}/client_usage_aliases >${dir}/old_client_usage_aliases
+        get_client_usage_time=$(date +%s)
+    fi
 }
 
 # ------------------------------------
@@ -2608,6 +2661,8 @@ down_send() {
 		[ -n "$ip_total" ] && ip_total="${str_linefeed}${str_tab} - $(translate "Total Traffic:") ${str_space}${str_space}${str_space}${str_space}${ip_total}"
 		local time1=$(date +%s)
 		local time1=$(time_for_humans $(expr ${time1} - ${time_up}))
+		# 添加设备dBm值获取
+		local dbm_value=$(find_Dbm "$mac")
 
 		if [ -z "$title" ]; then
 			title=$(translate "%s disconnected" "$name")
@@ -2626,6 +2681,9 @@ ${str_linefeed}${str_tab} - $(translate "Client Name:")${str_space}${str_space}$
 ${str_linefeed}${str_tab} - $(translate "Client IP:")${str_space}${str_space}${str_space}${str_space}${ip}\
 ${str_linefeed}${str_tab} - $(translate "Client MAC:")${str_space}${str_space}${str_space}${str_space}${mac}${ip_total}\
 ${str_linefeed}${str_tab} - $(translate "Uptime:")${str_space}${str_space}${str_space}${str_space}${time1}"
+
+		[ -n "$dbm_value" ] && content="${content}\
+${str_linefeed}${str_tab} - $(translate "Signal Strength:")${str_space}${str_space}${str_space}${str_space}${dbm_value}"
 
 		log_change "${disturb_text} $(translate "Device %s %s disconnected" "$name" "$ip")"
 		
